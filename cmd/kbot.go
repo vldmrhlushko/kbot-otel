@@ -1,49 +1,87 @@
 /*
-Copyright © 2022 NAME HERE <EMAIL ADDRESS>
+Copyright © 2023 NAME HERE den.vasyliev@gmail.com
 */
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stianeikeland/go-rpio"
-	telebot "gopkg.in/telebot.v4"
+
+	"github.com/hirosassa/zerodriver"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
+	telebot "gopkg.in/telebot.v3"
 )
 
 var (
 	// TeleToken bot
 	TeleToken = os.Getenv("TELE_TOKEN")
+	// MetricsHost exporter host:port
+	MetricsHost = os.Getenv("METRICS_HOST")
 )
 
-// TrafficSignal represents a single traffic light signal
-type TrafficSignal struct {
-	Pin int8
-	On  bool
+// Initialize OpenTelemetry
+func initMetrics(ctx context.Context) {
+
+	// Create a new OTLP Metric gRPC exporter with the specified endpoint and options
+	exporter, _ := otlpmetricgrpc.New(
+		ctx,
+		otlpmetricgrpc.WithEndpoint(MetricsHost),
+		otlpmetricgrpc.WithInsecure(),
+	)
+
+	// Define the resource with attributes that are common to all metrics.
+	// labels/tags/resources that are common to all metrics.
+	resource := resource.NewWithAttributes(
+		semconv.SchemaURL,
+		semconv.ServiceNameKey.String(fmt.Sprintf("kbot_%s", appVersion)),
+	)
+
+	// Create a new MeterProvider with the specified resource and reader
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(resource),
+		sdkmetric.WithReader(
+			// collects and exports metric data every 10 seconds.
+			sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(10*time.Second)),
+		),
+	)
+
+	// Set the global MeterProvider to the newly created MeterProvider
+	otel.SetMeterProvider(mp)
+
+}
+
+func pmetrics(ctx context.Context, payload string) {
+	// Get the global MeterProvider and create a new Meter with the name "kbot_light_signal_counter"
+	meter := otel.GetMeterProvider().Meter("kbot_light_signal_counter")
+
+	// Get or create an Int64Counter instrument with the name "kbot_light_signal_<payload>"
+	counter, _ := meter.Int64Counter(fmt.Sprintf("kbot_light_signal_%s", payload))
+
+	// Add a value of 1 to the Int64Counter
+	counter.Add(ctx, 1)
 }
 
 // kbotCmd represents the kbot command
 var kbotCmd = &cobra.Command{
 	Use:     "kbot",
 	Aliases: []string{"start"},
-	Short:   "Telegram bot for controlling traffic light signals",
-	Long: `A Telegram bot that allows controlling traffic light signals through GPIO pins.
-The bot accepts commands to toggle red, amber, and green lights on/off.
+	Short:   "A brief description of your command",
+	Long: `A longer description that spans multiple lines and likely contains examples
+and usage of using your command. For example:
 
-Usage:
-  /s red    - Toggle red light
-  /s amber  - Toggle amber light
-  /s green  - Toggle green light
-  hello     - Get a greeting from the bot`,
+Cobra is a CLI library for Go that empowers applications.
+This application is a tool to generate the needed files
+to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if TeleToken == "" {
-			log.Fatal("TELE_TOKEN environment variable is not set")
-		}
-
-		fmt.Printf("kbot %s started\n", appVersion)
+		logger := zerodriver.NewProductionLogger()
 
 		kbot, err := telebot.NewBot(telebot.Settings{
 			URL:    "",
@@ -52,54 +90,50 @@ Usage:
 		})
 
 		if err != nil {
-			log.Fatalf("Please check TELE_TOKEN env variable. %s", err)
+			logger.Fatal().Str("Error", err.Error()).Msg("Please check TELE_TOKEN")
+			return
+		} else {
+			logger.Info().Str("Version", appVersion).Msg("kbot started")
+
 		}
 
-		if err := rpio.Open(); err != nil {
-			log.Fatalf("Unable to open GPIO: %s", err)
-		}
-		defer rpio.Close()
+		trafficSignal := make(map[string]map[string]int8)
 
-		// Initialize traffic signals
-		trafficSignals := map[string]*TrafficSignal{
-			"red":   {Pin: 12, On: false},
-			"amber": {Pin: 27, On: false},
-			"green": {Pin: 22, On: false},
-		}
+		trafficSignal["red"] = make(map[string]int8)
+		trafficSignal["amber"] = make(map[string]int8)
+		trafficSignal["green"] = make(map[string]int8)
 
-		// Initialize all pins as input
-		for _, signal := range trafficSignals {
-			pin := rpio.Pin(signal.Pin)
-			pin.Input()
-		}
+		trafficSignal["red"]["pin"] = 12
+		trafficSignal["amber"]["pin"] = 27
+		trafficSignal["green"]["pin"] = 22
 
 		kbot.Handle(telebot.OnText, func(m telebot.Context) error {
-			log.Printf("Received message: %s", m.Text())
+			logger.Info().Str("Payload", m.Text()).Msg(m.Message().Payload)
+
 			payload := m.Message().Payload
+			pmetrics(context.Background(), payload)
 
 			switch payload {
 			case "hello":
-				return m.Send(fmt.Sprintf("Hello I'm Kbot %s!", appVersion))
+				err = m.Send(fmt.Sprintf("Hello I'm Kbot %s!", appVersion))
 
 			case "red", "amber", "green":
-				signal := trafficSignals[payload]
-				pin := rpio.Pin(signal.Pin)
 
-				if !signal.On {
-					pin.Output()
-					pin.High()
-					signal.On = true
+				if trafficSignal[payload]["on"] == 0 {
+					trafficSignal[payload]["on"] = 1
 				} else {
-					pin.Low()
-					pin.Input()
-					signal.On = false
+					trafficSignal[payload]["on"] = 0
 				}
 
-				return m.Send(fmt.Sprintf("Switched %s light %s", payload, map[bool]string{true: "on", false: "off"}[signal.On]))
+				err = m.Send(fmt.Sprintf("Switch %s light signal to %d", payload, trafficSignal[payload]["on"]))
 
 			default:
-				return m.Send("Usage: /s red|amber|green")
+				err = m.Send("Usage: /s red|amber|green")
+
 			}
+
+			return err
+
 		})
 
 		kbot.Start()
@@ -107,6 +141,8 @@ Usage:
 }
 
 func init() {
+	ctx := context.Background()
+	initMetrics(ctx)
 	rootCmd.AddCommand(kbotCmd)
 
 	// Here you will define your flags and configuration settings.
@@ -118,4 +154,7 @@ func init() {
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// kbotCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+
+	// Initialize OpenTelemetry tracer
+
 }

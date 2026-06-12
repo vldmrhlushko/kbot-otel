@@ -3,8 +3,8 @@
 # Declare variables to be passed into your templates.
 replicaCount: 1
 image:
-  repository: "denvasyliev"
-  tag: "v1.0.0-b161809"
+  repository: "vldmrhlushko"
+  tag: "v1.0.0-otel"
   arch: amd64
 secret:
   name: "kbot"
