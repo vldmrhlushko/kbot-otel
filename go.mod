@@ -1,8 +1,9 @@
-module github.com/den-vasyliev/kbot
+module github.com/vldmrhlushko/kbot
 
 go 1.19
 
 require (
+	github.com/den-vasyliev/kbot v1.0.7
 	github.com/hirosassa/zerodriver v0.1.4
 	github.com/rs/zerolog v1.29.1
 	github.com/spf13/cobra v1.6.1
