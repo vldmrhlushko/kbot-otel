@@ -12,4 +12,5 @@ secret:
 securityContext:
   privileged: true
 env:
-  METRICS_HOST: "otel-collector:4317"
+  - name: METRICS_HOST
+    value: "otel-collector:4317"
